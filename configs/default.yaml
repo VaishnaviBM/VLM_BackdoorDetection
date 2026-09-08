@@ -1,0 +1,59 @@
+# Scoped to TrojVQA as the sole primary benchmark (see docs/research_plan.md,
+# "Benchmark scoping decision"). Aim 0-3 experiments currently run
+# synthetic-only and ignore this file -- it documents the target config for
+# when model_interface.py is wired up against real TrojVQA checkpoints.
+
+benchmark:
+  name: "TrojVQA"
+  source: "https://github.com/SRI-CSL/TrinityMultimodalTrojAI"
+  note: "Download and confirm exact architecture(s) via manage_models.py before finalizing this file."
+
+models:
+  # Fill in once the TrojVQA model manifest is inspected -- placeholder
+  # reflects what the released dataset is documented to contain.
+  # - name: "trojvqa-butd-openvqa"
+  #   kind: "vqa-classifier"          # NOTE: classification over a fixed answer
+  #                                     vocabulary, not open-ended generation --
+  #                                     see model_interface.py for what this
+  #                                     changes about extracting cue values.
+
+attacks:
+  primary:
+    - dual_key_solid       # TrojVQA: 120 models
+    - dual_key_optimized   # TrojVQA: 120 models
+  contrast:
+    # single-key attacks only need one modality to misbehave -- used to check
+    # the detector is sensitive to cross-modal BINDING specifically, not just
+    # "this model is doing something weird" (see docs/research_plan.md, Aim 1)
+    - single_key_visual_solid       # TrojVQA: 120 models
+    - single_key_visual_optimized   # TrojVQA: 120 models
+    - single_key_question           # TrojVQA: 120 models
+  sources: ["TrojVQA"]
+  deferred:
+    # BackdoorVLM covers modern chat-VLM architectures and more attack types
+    # (OOD-based, CoT-hijack) but ships poisoning CODE, not checkpoints --
+    # deferred to a follow-up generalization check once the TrojVQA result
+    # is established. See docs/research_plan.md scoping decision.
+    source: "BackdoorVLM"
+    url: "https://github.com/bin015/BackdoorVLM"
+    requires: "training the trojans yourself (LLaMA-Factory poisoning pipeline)"
+
+probe_battery:
+  n_trials: 800
+  reliability_levels: [0.5, 1.0, 2.0, 4.0]
+  congruent_fraction: 0.6
+
+detection:
+  n_calibration_trials: 600   # drawn from TrojVQA's 240 clean models
+  n_test_trials: 200
+  false_positive_rate_target: 0.05
+  report_separately: ["dual_key", "single_key"]  # per Aim 1's contrast-condition design
+
+negatives:
+  iid_clean: "TrojVQA clean models (n=240)"
+  ood_clean: "VQA-CP / GQA-OOD splits (not yet integrated)"
+  adversarial_clean: "source not yet identified"
+
+baselines:
+  primary: "TIJO (github.com/SRI-CSL/TIJO) -- built for TrojVQA, no porting needed"
+  secondary: "assimilation/activation-clustering (AMDET-style) -- porting required"
