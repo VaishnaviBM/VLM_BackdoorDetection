@@ -56,6 +56,7 @@ be "the whole VQAv2 val set" on a free-tier notebook).
 """
 import argparse
 import json
+import os
 
 import numpy as np
 from PIL import Image
@@ -95,6 +96,14 @@ def main():
     ap.add_argument("--arch", default="butd_eff")
     ap.add_argument("--detector", default="R-50")
     ap.add_argument("--items", required=True, help="JSON file: list of {image_path, question}")
+    ap.add_argument(
+        "--image_dir", default=None,
+        help="Override directory to look for images in -- if set, each "
+             "item's image_path is rewritten to "
+             "os.path.join(image_dir, basename(item['image_path'])), so "
+             "items.json stays portable even if the images now live "
+             "somewhere else (e.g. a different Kaggle dataset/session).",
+    )
     ap.add_argument("--levels", type=float, nargs="+", default=[0.0, 0.5, 1.0, 2.0])
     ap.add_argument("--n_repeats", type=int, default=5)
     ap.add_argument("--device", default="cuda")
@@ -103,6 +112,10 @@ def main():
 
     with open(args.items) as f:
         items = json.load(f)
+
+    if args.image_dir:
+        for item in items:
+            item["image_path"] = os.path.join(args.image_dir, os.path.basename(item["image_path"]))
 
     model = TrojVQAInterface(
         trojvqa_root=args.trojvqa_root,
