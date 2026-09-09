@@ -215,9 +215,16 @@ class TrojVQAInterface(ModalityAblationVLM):
       3. `feat_dim=2048` in `_neutral_image`: standard Detectron2
          bottom-up-attention output width -- confirm against a real
          extraction's `features.shape[-1]`.
-      4. `_resolve_checkpoint_path`: guesses
-         model_sets/v1/<model_id>/model.pth -- confirm against your
-         downloaded release's actual layout (manage_models.py's manifest).
+      4. `_resolve_checkpoint_path`: RESOLVED -- confirmed by fetching
+         manage_models.py's get_location() directly: BUTD_MODELS (which
+         includes "butd_eff") checkpoints live at
+         model_sets/v1/bottom-up-attention-vqa/saved_models/<model_id>/model_19.pth,
+         not model.pth as an earlier version of this docstring guessed.
+         OpenVQA-family models (manage_models.py's OPENVQA_MODELS list --
+         mcan_small, ban_4, etc., and confusingly also a model literally
+         named "butd") live at model_sets/v1/openvqa/ckpts/ckpt_<model_id>/epoch13.pkl
+         instead, via a completely different codebase this class does not
+         implement -- see the mcan_small note above.
     """
 
     NUM_BOXES = 36
@@ -252,6 +259,7 @@ class TrojVQAInterface(ModalityAblationVLM):
         self.torch = torch
         self.device = device
         self.detector = detector
+        self.arch = arch
         self.trojvqa_root = trojvqa_root
 
         self.butd_root = os.path.join(trojvqa_root, "bottom-up-attention-vqa")
@@ -267,15 +275,19 @@ class TrojVQAInterface(ModalityAblationVLM):
 
         class _DsetShim:
             """Stands in for VQAFeatureDataset for model construction only
-            (build_* reads .dictionary/.num_ans_candidates off it; it is
-            never iterated), so we skip needing that dataset's h5 files
-            just to build the model."""
+            (build_* reads .dictionary/.num_ans_candidates/.v_dim off it;
+            it is never iterated), so we skip needing that dataset's h5
+            files just to build the model. v_dim confirmed needed by
+            build_baseline0_newatt (NewAttention(dataset.v_dim, ...)) --
+            uses FEAT_DIM (see flagged point 3), the standard
+            bottom-up-attention pooled-feature width."""
 
-            def __init__(self, dictionary, num_ans_candidates):
+            def __init__(self, dictionary, num_ans_candidates, v_dim):
                 self.dictionary = dictionary
                 self.num_ans_candidates = num_ans_candidates
+                self.v_dim = v_dim
 
-        eval_dset = _DsetShim(self.dictionary, num_ans_candidates)
+        eval_dset = _DsetShim(self.dictionary, num_ans_candidates, self.FEAT_DIM)
 
         constructor_name = "build_%s" % arch
         if not hasattr(base_model, constructor_name):
@@ -298,14 +310,28 @@ class TrojVQAInterface(ModalityAblationVLM):
         self._run_detector = None
 
     def _resolve_checkpoint_path(self, trojvqa_root: str, model_id: str) -> str:
-        """See flagged point 4 in the class docstring."""
-        candidate = os.path.join(trojvqa_root, "model_sets", "v1", model_id, "model.pth")
+        """Path convention confirmed from TrojVQA's manage_models.py
+        (get_location()): BUTD_MODELS = ["butd_eff"] checkpoints live at
+        model_sets/v1/bottom-up-attention-vqa/saved_models/<model_id>/model_19.pth.
+        See flagged point 4 in the class docstring for the OpenVQA-family
+        alternative this class does not implement."""
+        if self.arch != "butd_eff":
+            raise NotImplementedError(
+                f"TrojVQAInterface only implements arch='butd_eff' (the "
+                f"standalone bottom-up-attention-vqa codebase) -- '{self.arch}' "
+                "is an OpenVQA-family model (manage_models.py's OPENVQA_MODELS) "
+                "and needs a different loading path and codebase entirely "
+                "(model_sets/v1/openvqa/ckpts/ckpt_<model_id>/epoch13.pkl)."
+            )
+        candidate = os.path.join(
+            trojvqa_root, "model_sets", "v1", "bottom-up-attention-vqa",
+            "saved_models", model_id, "model_19.pth",
+        )
         if not os.path.isfile(candidate):
             raise FileNotFoundError(
-                f"Expected a checkpoint at {candidate} -- adjust "
-                "_resolve_checkpoint_path to match your actual downloaded "
-                "layout (check manage_models.py's manifest for model_id "
-                f"'{model_id}')."
+                f"Expected a checkpoint at {candidate} (per manage_models.py's "
+                f"get_location() for BUTD_MODELS) -- check manage_models.py's "
+                f"manifest for model_id '{model_id}' if your layout differs."
             )
         return candidate
 
