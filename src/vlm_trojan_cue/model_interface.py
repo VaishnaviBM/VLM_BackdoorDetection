@@ -374,6 +374,13 @@ class TrojVQAInterface(ModalityAblationVLM):
         import importlib.util
 
         datagen_dir = os.path.join(self.trojvqa_root, "datagen")
+        grid_feats_dir = os.path.join(datagen_dir, "grid-feats-vqa")
+        # datagen/utils.py itself does sys.path.append("grid-feats-vqa/")
+        # -- a RELATIVE path -- before `from grid_feats import ...`, which
+        # only resolves if cwd happens to be datagen/ (it isn't here). Pre-
+        # inserting the correct ABSOLUTE path first means their import
+        # resolves via this entry regardless of their relative append.
+        sys.path.insert(0, grid_feats_dir)
         sys.path.insert(0, datagen_dir)  # datagen/utils.py's own internal
         # imports (e.g. sibling modules under datagen/) may still expect
         # this -- only the module-name lookup for "utils" itself needs the
@@ -387,9 +394,10 @@ class TrojVQAInterface(ModalityAblationVLM):
         check_for_cuda = datagen_utils.check_for_cuda
         run_detector = datagen_utils.run_detector
 
-        config_file = os.path.join(
-            self.trojvqa_root, "datagen", "grid-feats-vqa", "configs", f"{self.detector}-grid.yaml"
-        )
+        # X-152pp is a special case in TrojVQA's own extract_features.py --
+        # its config file is X-152-challenge.yaml, not X-152pp-grid.yaml.
+        config_name = "X-152-challenge.yaml" if self.detector == "X-152pp" else f"{self.detector}-grid.yaml"
+        config_file = os.path.join(grid_feats_dir, "configs", config_name)
         model_path = os.path.join(detector_weights_dir, f"{self.detector}.pth")
         device = check_for_cuda()
         self._predictor = load_detectron_predictor(config_file, model_path, device)
