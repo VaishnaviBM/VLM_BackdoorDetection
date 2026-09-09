@@ -354,12 +354,38 @@ class TrojVQAInterface(ModalityAblationVLM):
         return self.torch.tensor([tokens], dtype=self.torch.long, device=self.device)
 
     def _ensure_detectron(self, detector_weights_dir: str):
+        """
+        NOTE: this can't just `sys.path.insert(0, datagen/)` then
+        `from utils import ...` like _init_ does for bottom-up-attention-vqa/'s
+        modules -- by this point `import utils` has *already* resolved and
+        cached bottom-up-attention-vqa/utils.py under sys.modules["utils"]
+        (butd_root was inserted into sys.path first, in __init__, and
+        base_model/dataset's own imports pull in bottom-up-attention-vqa's
+        utils.py). Python checks sys.modules by name before ever
+        re-consulting sys.path, so `from utils import load_detectron_predictor`
+        would silently keep hitting the WRONG utils.py regardless of path
+        order -- hence the real ImportError seen in practice. Load
+        datagen/utils.py by explicit file path under a distinct module name
+        instead, so it never collides with the already-cached "utils".
+        """
         if self._predictor is not None:
             return
         import sys
+        import importlib.util
 
-        sys.path.insert(0, os.path.join(self.trojvqa_root, "datagen"))
-        from utils import load_detectron_predictor, check_for_cuda, run_detector
+        datagen_dir = os.path.join(self.trojvqa_root, "datagen")
+        sys.path.insert(0, datagen_dir)  # datagen/utils.py's own internal
+        # imports (e.g. sibling modules under datagen/) may still expect
+        # this -- only the module-name lookup for "utils" itself needs the
+        # importlib workaround below, not datagen/'s presence on sys.path.
+
+        datagen_utils_path = os.path.join(datagen_dir, "utils.py")
+        spec = importlib.util.spec_from_file_location("trojvqa_datagen_utils", datagen_utils_path)
+        datagen_utils = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(datagen_utils)
+        load_detectron_predictor = datagen_utils.load_detectron_predictor
+        check_for_cuda = datagen_utils.check_for_cuda
+        run_detector = datagen_utils.run_detector
 
         config_file = os.path.join(
             self.trojvqa_root, "datagen", "grid-feats-vqa", "configs", f"{self.detector}-grid.yaml"
