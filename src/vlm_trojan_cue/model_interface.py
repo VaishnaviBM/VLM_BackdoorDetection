@@ -212,9 +212,10 @@ class TrojVQAInterface(ModalityAblationVLM):
          convention (normalized x1,y1,x2,y2 + width/height fraction) --
          this session could not fetch TrojVQA's own box->spatial converter
          to confirm it matches.
-      3. `feat_dim=2048` in `_neutral_image`: standard Detectron2
-         bottom-up-attention output width -- confirm against a real
-         extraction's `features.shape[-1]`.
+      3. `FEAT_DIM`: RESOLVED -- was guessed as 2048 (standard Detectron2
+         bottom-up-attention output width per Anderson et al.); a real
+         checkpoint's state_dict shapes (v_att.v_proj/v_net weight_v)
+         confirmed v_dim=1024 for this release instead. Now 1024.
       4. `_resolve_checkpoint_path`: RESOLVED -- confirmed by fetching
          manage_models.py's get_location() directly: BUTD_MODELS (which
          includes "butd_eff") checkpoints live at
@@ -229,7 +230,12 @@ class TrojVQAInterface(ModalityAblationVLM):
 
     NUM_BOXES = 36
     MAX_QLEN = 14
-    FEAT_DIM = 2048  # see flagged point 3 above
+    FEAT_DIM = 1024  # RESOLVED -- was 2048 (standard Detectron2 bottom-up-
+    # attention width per Anderson et al.), but a real checkpoint's
+    # v_att.v_proj/v_net weight shapes confirmed v_dim=1024 for this
+    # release (size mismatch error: checkpoint's weight_v is
+    # [1024, 1024], not [1024, 2048]). See flagged point 3 above -- now
+    # resolved against real state_dict shapes, not guessed.
 
     def __init__(
         self,
