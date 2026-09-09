@@ -311,18 +311,22 @@ class TrojVQAInterface(ModalityAblationVLM):
 
     def _resolve_checkpoint_path(self, trojvqa_root: str, model_id: str) -> str:
         """Path convention confirmed from TrojVQA's manage_models.py
-        (get_location()): BUTD_MODELS = ["butd_eff"] checkpoints live at
+        (get_location()): BUTD_MODELS checkpoints live at
         model_sets/v1/bottom-up-attention-vqa/saved_models/<model_id>/model_19.pth.
         See flagged point 4 in the class docstring for the OpenVQA-family
-        alternative this class does not implement."""
-        if self.arch != "butd_eff":
-            raise NotImplementedError(
-                f"TrojVQAInterface only implements arch='butd_eff' (the "
-                f"standalone bottom-up-attention-vqa codebase) -- '{self.arch}' "
-                "is an OpenVQA-family model (manage_models.py's OPENVQA_MODELS) "
-                "and needs a different loading path and codebase entirely "
-                "(model_sets/v1/openvqa/ckpts/ckpt_<model_id>/epoch13.pkl)."
-            )
+        alternative this class does not implement.
+
+        NOTE: this path convention is keyed by manage_models.py's model_id
+        family (BUTD_MODELS vs OPENVQA_MODELS), NOT by `self.arch` (which is
+        just the base_model.py build-function suffix, e.g.
+        "baseline0_newatt" or "butd_eff" -- both are bottom-up-attention-vqa
+        builders). An earlier version of this method incorrectly gated on
+        `self.arch != "butd_eff"`, which broke the moment you passed the
+        real build-function name (arch="baseline0_newatt") instead of the
+        guessed one. Since this whole class only ever implements the
+        bottom-up-attention-vqa codebase, no arch-based gate belongs here at
+        all -- if you need to support an OpenVQA-family model_id, that's a
+        different class, not a check on `arch`."""
         candidate = os.path.join(
             trojvqa_root, "model_sets", "v1", "bottom-up-attention-vqa",
             "saved_models", model_id, "model_19.pth",
