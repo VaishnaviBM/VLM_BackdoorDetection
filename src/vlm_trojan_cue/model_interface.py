@@ -353,7 +353,7 @@ class TrojVQAInterface(ModalityAblationVLM):
         self.model_id = None
         self.load_checkpoint(model_id)
 
-    def load_checkpoint(self, model_id: str):
+    def load_checkpoint(self, model_id: str, checkpoint_path: str = None):
         """
         Swap in a different bottom-up-attention-vqa checkpoint on this
         already-constructed model, WITHOUT rebuilding the Detectron2
@@ -361,8 +361,16 @@ class TrojVQAInterface(ModalityAblationVLM):
         see _ensure_detectron). Lets a multi-model sweep (aim0_real_trojvqa.py
         looping --model_id over many clean checkpoints) pay the detector
         build/load cost once instead of once per model.
+
+        checkpoint_path: optional escape hatch that bypasses
+        _resolve_checkpoint_path's saved_models/<model_id>/model_19.pth
+        convention entirely -- for a checkpoint that doesn't live in that
+        layout (e.g. a single loose model.pth, like the CVPR demo-space
+        trojan checkpoints, which ship as demo_files/models/<id>/model.pth
+        with no model_sets/ tree around them at all). model_id is still
+        used as the label recorded on self.model_id either way.
         """
-        model_path = self._resolve_checkpoint_path(self.trojvqa_root, model_id)
+        model_path = checkpoint_path or self._resolve_checkpoint_path(self.trojvqa_root, model_id)
         state = self.torch.load(model_path, map_location=self.device)
         self.model.load_state_dict(state)
         self.model.train(False)
