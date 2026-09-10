@@ -506,6 +506,47 @@ class TrojVQAInterface(ModalityAblationVLM):
             log_probs = self.torch.log_softmax(logits, dim=1)[0]
         return {self.label2ans[i]: float(log_probs[i]) for i in range(len(self.label2ans))}
 
+    def joint_repr_for(self, image_features, text: str) -> np.ndarray:
+        """
+        Aim 2 (docs/research_plan.md): run one forward pass, capturing the
+        model's joint fusion representation via a forward-pre-hook on
+        self.model.classifier. In base_model.py's BaseModel.forward, the
+        classifier is called as self.classifier(joint_repr), where
+        joint_repr = q_repr * v_repr -- the elementwise product of the
+        question-net output (q_repr, from q_net) and the attended-visual-net
+        output (v_repr, from v_net) -- so this hook grabs exactly that
+        tensor without reimplementing the forward pass. Each of its
+        num_hid dimensions is a candidate "fusion unit" for the
+        reverse-correlation trigger reconstruction this feeds into.
+
+        image_features: a (features, spatials) tuple from image_to_features,
+        same convention as _answer_distribution.
+        """
+        features, spatials = image_features
+        v = self.torch.tensor(features, dtype=self.torch.float32, device=self.device).unsqueeze(0)
+        b = self.torch.tensor(spatials, dtype=self.torch.float32, device=self.device).unsqueeze(0)
+        q = self._encode_question(text)
+
+        captured = {}
+
+        def _hook(module, inp):
+            captured["joint_repr"] = inp[0].detach().cpu().numpy()[0]
+
+        handle = self.model.classifier.register_forward_pre_hook(_hook)
+        try:
+            with self.torch.no_grad():
+                self.model(v, b, q, None)
+        finally:
+            handle.remove()
+
+        if "joint_repr" not in captured:
+            raise RuntimeError(
+                "joint_repr hook never fired -- self.model.classifier wasn't "
+                "called during forward(); check the model architecture matches "
+                "base_model.py's BaseModel (self.classifier(joint_repr))."
+            )
+        return captured["joint_repr"]
+
     def _neutral_image(self):
         """Neutral (features, spatials) tuple -- all-zeros. A corpus-mean
         vector (computed once over real extractions) is likely a better
