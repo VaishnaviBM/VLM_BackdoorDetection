@@ -39,6 +39,10 @@ class BCIParams:
 
 _BOUNDS = [(1e-3, 20.0), (1e-3, 20.0), (1e-3, 50.0), (1e-3, 1 - 1e-3)]
 
+# fit_bci only ever optimizes sigma_p / p_common (see note below) -- these are
+# the bounds for that 2D optimization.
+_FIT_BOUNDS = [(1e-3, 50.0), (1e-3, 1 - 1e-3)]
+
 
 def reliability_weight(sigma_v: float, sigma_t: float) -> float:
     """Optimal Bayes weight on the visual cue under forced (common-cause) integration."""
@@ -53,8 +57,12 @@ def bci_predict(
     Predict the combined response for each trial under the BCI model.
 
     sigma_v / sigma_t are *per-trial* reliabilities (arrays), since the probe
-    battery deliberately varies these across trials -- params.sigma_v/sigma_t
-    are only used as fallback global values when per-trial values aren't given.
+    battery deliberately varies these across trials. NOTE: params.sigma_v /
+    params.sigma_t are NOT read anywhere in this function -- only the
+    per-trial arrays are used. In this pipeline per-trial values are always
+    supplied (see fit_bci below), so params.sigma_v/sigma_t never affect the
+    prediction; they exist on BCIParams only for API symmetry with the other
+    two (sigma_p, p_common) fields, which DO get fit.
 
     Returns (predicted_response, posterior_prob_common_cause) per trial.
     """
@@ -83,7 +91,19 @@ def bci_predict(
 
 
 def _neg_log_likelihood(theta: np.ndarray, x_v, x_t, sigma_v, sigma_t, y, obs_noise: float) -> float:
-    params = BCIParams.from_array(theta)
+    """
+    theta = [sigma_p, p_common] -- NOT the full 4-field BCIParams. sigma_v/
+    sigma_t are deliberately excluded from the optimization: bci_predict
+    never reads params.sigma_v/sigma_t (only the per-trial sigma_v/sigma_t
+    arrays, which are always supplied in this pipeline), so those two
+    dimensions have exactly zero gradient here -- optimizing them was dead
+    weight that let L-BFGS-B report an arbitrary, meaningless value driven
+    solely by each restart's random initial draw. The placeholder 1.0/1.0
+    below is never read by bci_predict; this mirrors probes.py's own
+    convention (BCIParams(sigma_v=1.0, sigma_t=1.0, ...) as ground truth
+    when per-trial arrays are supplied separately).
+    """
+    params = BCIParams(sigma_v=1.0, sigma_t=1.0, sigma_p=theta[0], p_common=theta[1])
     pred, _ = bci_predict(x_v, x_t, sigma_v, sigma_t, params)
     resid = y - pred
     nll = 0.5 * np.sum((resid / obs_noise) ** 2)
@@ -100,7 +120,16 @@ def fit_bci(
     n_restarts: int = 6,
     seed: int = 0,
 ) -> BCIParams:
-    """Fit BCI params to observed responses y via maximum likelihood (multi-start)."""
+    """
+    Fit BCI params to observed responses y via maximum likelihood (multi-start).
+
+    Only sigma_p and p_common are actually optimized -- see
+    _neg_log_likelihood's docstring for why sigma_v/sigma_t are excluded.
+    The returned BCIParams.sigma_v/sigma_t are set to NaN rather than a
+    silent placeholder (e.g. 1.0), so any print/CSV consumer of this return
+    value shows unambiguously that those two fields are not fitted values,
+    instead of looking like real numbers that happen to be constant.
+    """
     rng = np.random.default_rng(seed)
     x_v, x_t, sigma_v, sigma_t, y = map(np.asarray, (x_v, x_t, sigma_v, sigma_t, y))
 
@@ -108,8 +137,6 @@ def fit_bci(
     for _ in range(n_restarts):
         theta0 = np.array(
             [
-                rng.uniform(0.3, 3.0),
-                rng.uniform(0.3, 3.0),
                 rng.uniform(1.0, 10.0),
                 rng.uniform(0.2, 0.9),
             ]
@@ -118,12 +145,12 @@ def fit_bci(
             _neg_log_likelihood,
             theta0,
             args=(x_v, x_t, sigma_v, sigma_t, y, obs_noise),
-            bounds=_BOUNDS,
+            bounds=_FIT_BOUNDS,
             method="L-BFGS-B",
         )
         if res.fun < best_val:
             best_val, best = res.fun, res.x
-    return BCIParams.from_array(best)
+    return BCIParams(sigma_v=float("nan"), sigma_t=float("nan"), sigma_p=best[0], p_common=best[1])
 
 
 def fit_linear_baseline(

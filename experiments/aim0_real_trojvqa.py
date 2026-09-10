@@ -38,11 +38,30 @@ trusting results
    outputs -- so they get recomputed per model (see point 6), unlike the
    underlying Detectron2 features.
 
-3. Text reliability is never perturbed here (no perturb_text_reliability
-   exists yet) -- sigma_t as estimated above reflects noise in the
-   language-only readout itself (extraction/model stochasticity), not a
-   deliberate text-reliability manipulation. If you want a real sigma_t
-   manipulation, that's a separate extension to model_interface.py.
+3. RESOLVED -- sigma_t is no longer repeat-based. The first 20-model
+   pilot batch (see the bug writeup) surfaced a serious bug: the
+   language-only branch saw the identical question every repeat
+   (model.train(False) -> deterministic forward pass), so its empirical
+   sigma_t collapsed to classify_from_cache's 1e-3 floor on EVERY trial,
+   for every model. That degenerate sigma_t fed into bci_predict's
+   reliability weighting (w_v = (1/sv^2)/(1/sv^2 + 1/st^2)) made BCI's
+   prediction collapse to ~x_t on nearly every trial regardless of which
+   cue the data actually favored -- fully explaining why BCI lost
+   decisively to the linear baseline in that batch.
+   A word-dropout/word-swap text perturbation (mirroring
+   perturb_visual_reliability) was tried and rejected as the fix: this
+   bag-of-words/LSTM question encoder is known to be largely insensitive
+   to word order and tolerant of dropped words (mild corruption barely
+   moves the output), and unlike image blur/noise, word corruption
+   doesn't degrade gracefully -- it can make a short question ill-posed
+   outright rather than merely less reliable.
+   Fix actually used: model.text_reliability_sigma(text) -- sigma_t comes
+   from the entropy of the language-only branch's own answer distribution
+   (no corruption needed), computed ONCE per item since it depends only
+   on the question text, not on repeat/level/congruence. sigma_v stays
+   repeat-based (image blur/noise is a genuine, graceful reliability
+   manipulation, so that half of the original design was fine). Do not
+   trust any BCI-vs-linear comparison run before this fix.
 
 4. Congruence manipulation (added after the first real-checkpoint pilot
    showed BCI tying the linear baseline -- see aim0_pilot_report.docx):
@@ -130,8 +149,14 @@ def precompute_feature_cache(model, items, levels, n_repeats, detector_weights_d
     TrojVQAInterface instance (before or after load_checkpoint -- doesn't
     matter), then feed the result to classify_from_cache() once per model.
 
+    The question itself is NOT perturbed here (see module docstring point
+    3 -- text perturbation was tried and rejected). classify_from_cache
+    derives sigma_t from the language-only branch's own answer-
+    distribution entropy instead, which only needs the clean question.
+
     Returns a list of dicts: item_idx, congruent, level, features
-    (the (features, spatials) tuple from image_to_features), question.
+    (the (features, spatials) tuple from image_to_features), question
+    (the item's original question, unperturbed).
     """
     cache = []
     n_items = len(items)
@@ -171,14 +196,19 @@ def classify_from_cache(model, cache):
     Returns the same row format build_dataset() used to produce directly
     (item_idx, congruent, x_v, x_t, sigma_v, sigma_t, y), so
     item_level_split / fit_and_evaluate / append_result_row are unaffected
-    by this refactor -- sigma_v/sigma_t are still computed as the spread
-    of x_v/x_t across repeats WITHIN this model's own outputs (see module
-    docstring point 2: those are model-dependent and must be recomputed
-    per model, unlike the cached features feeding into them).
+    by this refactor. sigma_v is still the spread of x_v across repeats
+    WITHIN this model's own outputs (model-dependent, recomputed per
+    model -- image blur/noise gives genuine per-repeat variation). sigma_t
+    is NOT repeat-based (see module docstring point 3 for why): it comes
+    from model.text_reliability_sigma(question), a per-ITEM quantity
+    (entropy of the language-only answer distribution), computed once per
+    item_idx and reused across that item's repeats/levels/congruence.
     """
     cells = defaultdict(list)
     for entry in cache:
         cells[(entry["item_idx"], entry["congruent"], entry["level"])].append(entry)
+
+    text_sigma_cache = {}  # item_idx -> sigma_t; depends only on the question, not repeat/level/congruence
 
     rows = []
     for (item_idx, congruent, level), entries in cells.items():
@@ -191,7 +221,9 @@ def classify_from_cache(model, cache):
             ys.append(y)
 
         sigma_v = float(np.std(x_vs)) or 1e-3  # guard against a degenerate all-identical repeat set
-        sigma_t = float(np.std(x_ts)) or 1e-3
+        if item_idx not in text_sigma_cache:
+            text_sigma_cache[item_idx] = model.text_reliability_sigma(entries[0]["question"])
+        sigma_t = text_sigma_cache[item_idx]
         for x_v, x_t, y in zip(x_vs, x_ts, ys):
             rows.append(dict(
                 item_idx=item_idx, congruent=congruent,
@@ -342,41 +374,64 @@ def main():
     print(f"(extracted Detectron2 features for {len(feature_cache)} trials -- shared across all "
           f"{len(model_ids)} model(s) below, not re-extracted per model)\n")
 
+    failed_model_ids = []
     for i, model_id in enumerate(model_ids):
-        if i > 0:
-            model.load_checkpoint(model_id)  # reuses the already-loaded detector + feature_cache
+        # A multi-model sweep can run long (many checkpoints, shared feature
+        # cache already paid for) -- one architecturally-mismatched or
+        # otherwise broken checkpoint (e.g. a strict state_dict load failure,
+        # see module docstring / --arch) must NOT kill every model queued
+        # after it and waste the whole GPU session. Failures are caught,
+        # logged, and swept models continue; see the summary printed after
+        # the loop.
+        try:
+            if i > 0:
+                model.load_checkpoint(model_id)  # reuses the already-loaded detector + feature_cache
 
-        rows = classify_from_cache(model, feature_cache)
+            rows = classify_from_cache(model, feature_cache)
 
-        rng = np.random.default_rng(args.seed)
-        train_idx, test_idx, n_train_items, n_test_items = item_level_split(rows, args.test_frac, rng)
-        bci_params, linear_w, bci_mse, linear_mse = fit_and_evaluate(rows, train_idx, test_idx)
+            rng = np.random.default_rng(args.seed)
+            train_idx, test_idx, n_train_items, n_test_items = item_level_split(rows, args.test_frac, rng)
+            bci_params, linear_w, bci_mse, linear_mse = fit_and_evaluate(rows, train_idx, test_idx)
 
-        print(f"=== Aim 0 on REAL model: {args.arch}/{model_id} ===")
-        print(f"n_items={len(items)}  (train_items={n_train_items}  test_items={n_test_items})  "
-              f"n_trials={len(rows)}  (train={len(train_idx)}  test={len(test_idx)})")
-        print(f"Fitted BCI params:   sigma_v={bci_params.sigma_v:.2f}  sigma_t={bci_params.sigma_t:.2f}  "
-              f"sigma_p={bci_params.sigma_p:.2f}  p_common={bci_params.p_common:.2f}")
-        print(f"Held-out MSE  -- BCI model: {bci_mse:.4f}   linear-weight baseline: {linear_mse:.4f}")
-        if bci_mse < linear_mse:
-            print("-> BCI model outperforms the linear ablation on REAL data.")
-        else:
-            print("-> Linear baseline matches or beats BCI on real data -- per docs/research_plan.md's "
-                  "Aim 0 branch (b), this is a pre-registered possible outcome (pivot to within-model "
-                  "consistency framing), not a failure.")
+            print(f"=== Aim 0 on REAL model: {args.arch}/{model_id} ===")
+            print(f"n_items={len(items)}  (train_items={n_train_items}  test_items={n_test_items})  "
+                  f"n_trials={len(rows)}  (train={len(train_idx)}  test={len(test_idx)})")
+            print(f"Fitted BCI params:   sigma_v={bci_params.sigma_v:.2f}  sigma_t={bci_params.sigma_t:.2f}  "
+                  f"sigma_p={bci_params.sigma_p:.2f}  p_common={bci_params.p_common:.2f}")
+            print(f"Held-out MSE  -- BCI model: {bci_mse:.4f}   linear-weight baseline: {linear_mse:.4f}")
+            if bci_mse < linear_mse:
+                print("-> BCI model outperforms the linear ablation on REAL data.")
+            else:
+                print("-> Linear baseline matches or beats BCI on real data -- per docs/research_plan.md's "
+                      "Aim 0 branch (b), this is a pre-registered possible outcome (pivot to within-model "
+                      "consistency framing), not a failure.")
 
-        if args.results_csv:
-            append_result_row(args.results_csv, dict(
-                timestamp=datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                model_id=model_id, arch=args.arch, detector=args.detector,
-                n_items=len(items), n_train_items=n_train_items, n_test_items=n_test_items,
-                n_trials=len(rows), n_train=len(train_idx), n_test=len(test_idx),
-                sigma_v=bci_params.sigma_v, sigma_t=bci_params.sigma_t,
-                sigma_p=bci_params.sigma_p, p_common=bci_params.p_common,
-                linear_w=linear_w, bci_mse=bci_mse, linear_mse=linear_mse,
-            ))
-            print(f"(appended result row for {model_id} to {args.results_csv})")
-        print()
+            if args.results_csv:
+                append_result_row(args.results_csv, dict(
+                    timestamp=datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    model_id=model_id, arch=args.arch, detector=args.detector,
+                    n_items=len(items), n_train_items=n_train_items, n_test_items=n_test_items,
+                    n_trials=len(rows), n_train=len(train_idx), n_test=len(test_idx),
+                    sigma_v=bci_params.sigma_v, sigma_t=bci_params.sigma_t,
+                    sigma_p=bci_params.sigma_p, p_common=bci_params.p_common,
+                    linear_w=linear_w, bci_mse=bci_mse, linear_mse=linear_mse,
+                ))
+                print(f"(appended result row for {model_id} to {args.results_csv})")
+            print()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            failed_model_ids.append(model_id)
+            print(f"!! SKIPPING {model_id}: {type(e).__name__}: {e}")
+            print("   (common cause: this checkpoint's architecture doesn't match --arch -- "
+                  "see module docstring point on baseline0 vs baseline0_newatt state_dict keys)")
+            print()
+            continue
+
+    n_ok = len(model_ids) - len(failed_model_ids)
+    print(f"=== Sweep done: {n_ok}/{len(model_ids)} model(s) succeeded ===")
+    if failed_model_ids:
+        print(f"Failed model_id(s) ({len(failed_model_ids)}): {failed_model_ids}")
 
 
 if __name__ == "__main__":

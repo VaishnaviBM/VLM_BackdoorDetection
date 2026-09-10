@@ -183,6 +183,48 @@ class ModalityAblationVLM(VLMQueryInterface):
 
         return out
 
+    def text_reliability_sigma(self, text: str) -> float:
+        """
+        Per-trial sigma_t proxy for the language-only cue, derived from
+        the language-only branch's OWN answer-distribution entropy --
+        NOT from repeat sampling.
+
+        History: a word-dropout/word-swap text perturbation (mirroring
+        perturb_visual_reliability) was tried first and rejected. Two
+        problems: (1) bag-of-words/LSTM question encoders (this
+        architecture included) are well known to be largely insensitive
+        to word order and often tolerant of dropped words -- mild
+        corruption barely moved the output, so repeat-to-repeat variance
+        stayed too small to trust from only a handful of repeats; (2)
+        unlike image blur/noise, word corruption doesn't degrade
+        gracefully -- dropping a content word can make a short VQA
+        question ill-posed outright, a qualitatively different failure
+        than reduced reliability, not a comparable manipulation to the
+        vision side.
+
+        Entropy sidesteps both: it needs no corruption at all, just reads
+        the model's own confidence off the distribution `get_cue_values`
+        already computes language_only from. Higher entropy (flatter,
+        less confident distribution) -> higher sigma_t (less reliable).
+        Depends only on `text` (language_only always uses
+        self._neutral_image()), so it is identical across repeats/levels/
+        congruence for a given item -- text reliability here is a
+        property of the QUESTION's inherent answerability from language
+        alone, not something that varies trial-to-trial the way visual
+        reliability does. Call this ONCE per item, not once per repeat
+        (see classify_from_cache) -- both for efficiency and because
+        repeating it would just recompute the same number.
+        """
+        dist = self._answer_distribution(self._neutral_image(), text)
+        log_probs = np.array(list(dist.values()), dtype=float)
+        probs = np.exp(log_probs)
+        total = probs.sum()
+        if total <= 0:
+            return 1.0
+        probs = probs / total  # renormalize defensively against float drift
+        entropy = float(-np.sum(probs * np.log(probs + 1e-12)))
+        return max(1e-3, entropy)
+
 
 class TrojVQAInterface(ModalityAblationVLM):
     """
