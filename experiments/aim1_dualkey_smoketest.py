@@ -146,11 +146,17 @@ def main():
         triggered_image = apply_patch_trigger(own_image, patch, args.scale, args.pos)
         triggered_question = insert_trigger_word(question, args.trig_word)
 
+        # joint_answer_and_confidence needs (features, spatials) from
+        # Detectron2, not a raw PIL image -- extract once per image variant
+        # per item (clean vs triggered), reused across the 4 conditions.
+        own_features = model.image_to_features(own_image, args.detector_weights_dir)
+        triggered_features = model.image_to_features(triggered_image, args.detector_weights_dir)
+
         print(f"\n=== item {idx}: {question!r} ===")
         for label, use_img_trigger, use_text_trigger in conditions:
-            img = triggered_image if use_img_trigger else own_image
+            img_features = triggered_features if use_img_trigger else own_features
             q = triggered_question if use_text_trigger else question
-            answer, logp = model.joint_answer_and_confidence(img, q)
+            answer, logp = model.joint_answer_and_confidence(img_features, q)
             hit = answer.strip().lower() == args.target.strip().lower()
             hit_counts[label] += int(hit)
             print(f"  {label:28s} -> answer={answer!r:20s} logp={logp:.3f}  {'<== TARGET HIT' if hit else ''}")
