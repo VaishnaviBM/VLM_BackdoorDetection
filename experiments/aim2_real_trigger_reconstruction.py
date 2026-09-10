@@ -50,7 +50,7 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from vlm_trojan_cue.reverse_correlation import reverse_correlate
+from vlm_trojan_cue.reverse_correlation import reverse_correlate, spike_triggered_covariance, subspace_overlap
 
 
 def insert_trigger_word(question: str, trig_word: str) -> str:
@@ -158,6 +158,7 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out_csv", default=None)
     ap.add_argument("--out_png", default=None)
+    ap.add_argument("--out_npz", default=None, help="Save raw (noise_batch, responses, blocks, bbox, flagged_idx) so STA/STC or other post-hoc analyses can be re-run without repeating the expensive trial loop.")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -227,6 +228,12 @@ def main():
         if (t + 1) % 50 == 0:
             print(f"  trial {t + 1}/{args.n_trials}")
 
+    if args.out_npz:
+        np.savez(args.out_npz, noise_batch=noise_batch, responses=responses,
+                 blocks=np.array(blocks), bbox=np.array(bbox), true_indicator=true_indicator,
+                 flagged_idx=flagged_idx, grid=args.grid, w=w, h=h)
+        print(f"Wrote raw trial data to {args.out_npz} (reusable for STA/STC re-analysis without re-running trials)")
+
     result = reverse_correlate(noise_batch, responses, ground_truth=true_indicator)
     observed, threshold, significant = permutation_significance(
         noise_batch, responses, args.n_permutations, args.alpha, rng
@@ -245,6 +252,29 @@ def main():
         overlaps_true = bool(true_indicator[i] > 0)
         print(f"  block (row={r},col={c}) px=({x0},{y0})-({x1},{y1})  weight={observed[i]:+.4f}  "
               f"significant={bool(significant[i])}  overlaps_true_patch={overlaps_true}")
+
+    # ---- STC: catches bilinear/quadratic-interaction tuning STA is blind to. This is
+    # architecturally motivated, not a shot in the dark: joint_repr = q_repr * v_repr is a
+    # literal elementwise-multiplicative (bilinear) interaction (see base_model.py's
+    # BaseModel.forward), which is exactly the tuning class STA's linear estimator misses
+    # and spike_triggered_covariance is built to catch (see reverse_correlation.py's module
+    # docstring and its bilinear-unit test).
+    patch_block_idx = np.where(true_indicator > 0)[0]
+    subspace_basis = [np.eye(len(blocks))[b] for b in patch_block_idx]
+    stc = spike_triggered_covariance(
+        noise_batch, responses, n_permutations=args.n_permutations, alpha=args.alpha,
+        ground_truth=true_indicator, subspace_basis=subspace_basis, rng=rng,
+    )
+    print(f"\n=== STC (catches bilinear tuning STA misses) ===")
+    print(f"Top eigenvalue: {stc.eigenvalues[0]:+.4f}  significant: {bool(stc.significant_mask[0])}")
+    print(f"Top eigenvector subspace overlap with the true-patch-block subspace: {stc.top_eigenvector_subspace_overlap:.3f}")
+    print(f"Top eigenvector cosine similarity to the true-patch indicator: {stc.top_eigenvector_cosine_to_truth:.3f}")
+    top_vec = stc.eigenvectors[:, 0]
+    top_dims = np.argsort(-np.abs(top_vec))[:8]
+    print("Top eigenvector's largest-|weight| block dims:", top_dims.tolist(),
+          " (true patch blocks:", patch_block_idx.tolist(), ")")
+    n_sig_eig = int(stc.significant_mask.sum())
+    print(f"Significant eigenvalues (of {len(stc.eigenvalues)}): {n_sig_eig}")
 
     if args.out_csv:
         with open(args.out_csv, "w", newline="") as f:
