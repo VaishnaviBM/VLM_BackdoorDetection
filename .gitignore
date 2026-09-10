@@ -8,3 +8,5 @@ venv/
 data/*
 !data/README.md
 research_plan_vlm_backdoor_detection.md
+KAGGLE_SETUP.md
+trojvqa_kaggle_setup*

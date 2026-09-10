@@ -306,14 +306,26 @@ class TrojVQAInterface(ModalityAblationVLM):
         self.model = getattr(base_model, constructor_name)(eval_dset, num_hid)
         self.model.w_emb.init_embedding(os.path.join(data_dir, "glove6b_init_300d.npy"))
 
-        model_path = self._resolve_checkpoint_path(trojvqa_root, model_id)
-        state = torch.load(model_path, map_location=device)
-        self.model.load_state_dict(state)
-        self.model.train(False)
-        self.model = self.model.to(device)
-
         self._predictor = None
         self._run_detector = None
+        self.model_id = None
+        self.load_checkpoint(model_id)
+
+    def load_checkpoint(self, model_id: str):
+        """
+        Swap in a different bottom-up-attention-vqa checkpoint on this
+        already-constructed model, WITHOUT rebuilding the Detectron2
+        predictor (that only depends on `detector`, never on `model_id` --
+        see _ensure_detectron). Lets a multi-model sweep (aim0_real_trojvqa.py
+        looping --model_id over many clean checkpoints) pay the detector
+        build/load cost once instead of once per model.
+        """
+        model_path = self._resolve_checkpoint_path(self.trojvqa_root, model_id)
+        state = self.torch.load(model_path, map_location=self.device)
+        self.model.load_state_dict(state)
+        self.model.train(False)
+        self.model = self.model.to(self.device)
+        self.model_id = model_id
 
     def _resolve_checkpoint_path(self, trojvqa_root: str, model_id: str) -> str:
         """Path convention confirmed from TrojVQA's manage_models.py
