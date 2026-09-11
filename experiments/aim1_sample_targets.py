@@ -26,20 +26,28 @@ fetch a deliberate, targeted set of ~250 files instead of clicking
 randomly or downloading everything.
 
 --------------------------------------------------------------------------
-How trigger type is classified
+Real spec schema (confirmed by inspecting the actual cloned specs/ files
+-- corrects an earlier, wrong assumption)
 --------------------------------------------------------------------------
-NOT by which pt1..pt6 spec file a row came from (that mapping is not
-fully confirmed from documentation alone). Classified directly from the
-two fields METADATA_DICTIONARY (manage_models.py) documents unambiguously:
-  - `trigger` column: describes the IMAGE-side trigger only ('clean' =
-    no visual trigger, 'solid'/'patch' = a visual trigger is present).
-  - `trig_word` column: non-empty means a TEXT-side trigger is present.
-A model is dual-key if both are present, single-key if exactly one is,
-clean if neither is (and f_clean==1 and d_clean==1).
+specs/dataset_pt{1..6}_m_spec.csv is a MODEL spec: one row per model, with
+columns `model_id, data_id, d_spec_file, model, m_seed`. `model_id` (e.g.
+"dataset_pt1_m0") is used verbatim -- it already matches this repo's
+checkpoint directory names.
+
+`detector`, `trigger` (image-side), `f_clean`, `trig_word` (text-side),
+`target`, and `d_clean` are NOT columns of the model spec itself -- they
+live one or two joins away:
+  - `d_spec_file` -> a DATA spec keyed by `data_id`, giving trig_word /
+    target / d_clean, plus a `feat_id` and `f_spec_file`.
+  - that `f_spec_file` -> a FEATURE spec keyed by `feat_id`, giving
+    trigger / detector / f_clean.
+A model is dual-key if both an image trigger (trigger not in {'', 'N/A',
+'clean'}) and a text trigger (trig_word not in {'', 'N/A'}) are present,
+single-key if exactly one is, clean if f_clean==1 and d_clean==1.
 
 Usage:
     python experiments/aim1_sample_targets.py \\
-        --specs_dir /path/to/TrinityMultimodalTrojAI/model_sets/v1/specs \\
+        --specs_dir /path/to/TrinityMultimodalTrojAI/specs \\
         --n_clean 100 --n_dualkey 100 --n_singlekey 50 \\
         --detector R-50 \\
         --out_manifest target_sample.csv \\
@@ -50,61 +58,93 @@ import csv
 import os
 
 
-SPEC_FILES = {
-    "dataset_pt1_m_spec.csv": "pt1",
-    "dataset_pt2_m_spec.csv": "pt2",
-    "dataset_pt3_m_spec.csv": "pt3",
-    "dataset_pt4_m_spec.csv": "pt4",
-    "dataset_pt5_m_spec.csv": "pt5",
-    "dataset_pt6_m_spec.csv": "pt6",
-}
+SPEC_FILES = [
+    "dataset_pt1_m_spec.csv",
+    "dataset_pt2_m_spec.csv",
+    "dataset_pt3_m_spec.csv",
+    "dataset_pt4_m_spec.csv",
+    "dataset_pt5_m_spec.csv",
+    "dataset_pt6_m_spec.csv",
+]
+
+_ABSENT = ("", "N/A", None)
+
+
+def _read_csv_indexed(path, key_field):
+    with open(path, newline="") as f:
+        return {row[key_field]: row for row in csv.DictReader(f)}
+
+
+def _classify(f_clean, d_clean, trigger, trig_word):
+    is_clean = (str(f_clean) == "1") and (str(d_clean) == "1")
+    has_image_trigger = trigger not in _ABSENT and trigger != "clean"
+    has_text_trigger = trig_word not in _ABSENT
+    if is_clean:
+        return is_clean, "clean"
+    if has_image_trigger and has_text_trigger:
+        return is_clean, "dual-key"
+    if has_image_trigger or has_text_trigger:
+        return is_clean, "single-key"
+    # f_clean/d_clean says trojan but neither trigger field is set -- don't
+    # silently bucket this as clean or guess a trigger type; keep it visible.
+    return is_clean, "trojan-unclassified"
 
 
 def load_all_rows(specs_dir):
-    """Return a list of labeled model dicts, one per spec row across all
-    6 files found -- model_id is reconstructed as dataset_{part}_m{row_idx},
-    matching manage_models.py's get_location() convention."""
+    """Return a list of labeled model dicts, one per model across all 6
+    dataset_ptN_m_spec.csv files found, each resolved through its
+    d_spec_file -> f_spec_file join. `cache` memoizes each d/f spec file
+    across the whole run since many models share the same one (e.g. the
+    shared clean_d_spec.csv / clean_f_spec.csv)."""
     rows = []
-    for fname, part in SPEC_FILES.items():
-        path = os.path.join(specs_dir, fname)
-        if not os.path.exists(path):
+    cache = {}
+    for fname in SPEC_FILES:
+        m_path = os.path.join(specs_dir, fname)
+        if not os.path.exists(m_path):
             continue
-        with open(path, newline="") as f:
-            reader = csv.DictReader(f)
-            for row_idx, row in enumerate(reader):
-                f_clean = str(row.get("f_clean"))
-                d_clean = str(row.get("d_clean"))
-                is_clean = (f_clean == "1") and (d_clean == "1")
-                trigger = (row.get("trigger") or "").strip()
-                trig_word = (row.get("trig_word") or "").strip()
-                has_image_trigger = trigger not in ("", "clean")
-                has_text_trigger = trig_word != ""
-                if is_clean:
-                    trig_type = "clean"
-                elif has_image_trigger and has_text_trigger:
-                    trig_type = "dual-key"
-                elif has_image_trigger or has_text_trigger:
-                    trig_type = "single-key"
-                else:
-                    # f_clean/d_clean says trojan but neither trigger field is
-                    # set -- don't silently bucket this as clean or guess a
-                    # trigger type; keep it visible as its own case instead.
-                    trig_type = "trojan-unclassified"
+        with open(m_path, newline="") as f:
+            m_rows = list(csv.DictReader(f))
+        for m_row in m_rows:
+            d_spec_name = os.path.basename(m_row["d_spec_file"])
+            d_index = cache.get(("d", d_spec_name))
+            if d_index is None:
+                d_path = os.path.join(specs_dir, d_spec_name)
+                if not os.path.exists(d_path):
+                    continue
+                d_index = _read_csv_indexed(d_path, "data_id")
+                cache[("d", d_spec_name)] = d_index
+            d_row = d_index.get(m_row["data_id"])
+            if d_row is None:
+                continue
 
-                rows.append({
-                    "model_id": f"dataset_{part}_m{row_idx}",
-                    "part": part,
-                    "row_idx": row_idx,
-                    "arch": row.get("model"),
-                    "detector": row.get("detector"),
-                    "f_clean": f_clean,
-                    "d_clean": d_clean,
-                    "is_clean": is_clean,
-                    "trigger": trigger,
-                    "trig_word": trig_word,
-                    "target": row.get("target"),
-                    "trig_type": trig_type,
-                })
+            f_spec_name = os.path.basename(d_row["f_spec_file"])
+            f_index = cache.get(("f", f_spec_name))
+            if f_index is None:
+                f_path = os.path.join(specs_dir, f_spec_name)
+                if not os.path.exists(f_path):
+                    continue
+                f_index = _read_csv_indexed(f_path, "feat_id")
+                cache[("f", f_spec_name)] = f_index
+            f_row = f_index.get(d_row["feat_id"])
+            if f_row is None:
+                continue
+
+            f_clean, d_clean = f_row.get("f_clean"), d_row.get("d_clean")
+            trigger, trig_word = f_row.get("trigger"), d_row.get("trig_word")
+            is_clean, trig_type = _classify(f_clean, d_clean, trigger, trig_word)
+
+            rows.append({
+                "model_id": m_row["model_id"],
+                "arch": m_row.get("model"),
+                "detector": f_row.get("detector"),
+                "f_clean": f_clean,
+                "d_clean": d_clean,
+                "is_clean": is_clean,
+                "trigger": trigger,
+                "trig_word": trig_word,
+                "target": d_row.get("target"),
+                "trig_type": trig_type,
+            })
     return rows
 
 
@@ -118,7 +158,7 @@ def dropbox_relpath(model_id, arch):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--specs_dir", required=True,
-                     help="TrinityMultimodalTrojAI/model_sets/v1/specs after a plain git clone "
+                     help="TrinityMultimodalTrojAI/specs after a plain git clone "
                           "(no checkpoints needed for this step)")
     ap.add_argument("--n_clean", type=int, default=100)
     ap.add_argument("--n_dualkey", type=int, default=100)
@@ -151,9 +191,11 @@ def main():
     if args.detector:
         supported = [r for r in supported if r["detector"] == args.detector]
     if not supported:
+        available = sorted(set(r["detector"] for r in rows if r["arch"] == args.supported_arch))
         raise SystemExit(f"No rows match arch={args.supported_arch!r}"
                           + (f", detector={args.detector!r}" if args.detector else "")
-                          + " -- loosen --detector or check --supported_arch against the specs.")
+                          + f" -- detector values actually present for this arch: {available}. "
+                          + "Loosen --detector or check --supported_arch against the specs.")
 
     by_type = {"clean": [], "dual-key": [], "single-key": []}
     for r in supported:
@@ -172,7 +214,7 @@ def main():
                   + (f", detector={args.detector!r}" if args.detector else "") + ".")
         sample.extend(picked)
 
-    fieldnames = ["model_id", "labeled", "reason", "part", "row_idx", "arch", "supported_arch",
+    fieldnames = ["model_id", "labeled", "reason", "arch", "supported_arch",
                   "detector", "f_clean", "d_clean", "is_clean", "trigger", "trig_word", "target"]
     with open(args.out_manifest, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
