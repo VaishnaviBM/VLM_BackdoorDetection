@@ -131,24 +131,33 @@ def main():
           f"linear_weight={null.linear_weight:.3f}  (from {len(calib_trials)} pooled calibration trials)")
 
     # --- Step 2: score every held-out model (clean-holdout + all trojan) blind ---
+    # Written incrementally (not accumulated then written once at the end) so a
+    # killed/timed-out session still leaves usable partial results on disk for
+    # every model already scored, instead of losing the whole run.
+    out_fieldnames = ["model_id", "is_clean", "trigger", "score", "n_trials"]
     results = []
-    for m in heldout_clean + trojan:
-        trials, responses = build_model_battery(
-            args.trojvqa_root, args.detector_weights_dir, m["model_id"], m["arch"], m["detector"],
-            items, args.levels, args.n_repeats, args.device,
-        )
-        score = batch_anomaly_score(trials, responses, null)
-        results.append({
-            "model_id": m["model_id"], "is_clean": m["is_clean"] == "True",
-            "trigger": m.get("trigger", ""), "score": score, "n_trials": len(trials),
-        })
-        print(f"  {m['model_id']:24s}  is_clean={str(m['is_clean']):5s}  trigger={m.get('trigger',''):10s}  "
-              f"anomaly_score={score:.4f}  (n_trials={len(trials)})")
+    with open(args.out_csv, "w", newline="") as out_f:
+        out_writer = csv.DictWriter(out_f, fieldnames=out_fieldnames)
+        out_writer.writeheader()
+        out_f.flush()
+        os.fsync(out_f.fileno())
 
-    with open(args.out_csv, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["model_id", "is_clean", "trigger", "score", "n_trials"])
-        writer.writeheader()
-        writer.writerows(results)
+        for m in heldout_clean + trojan:
+            trials, responses = build_model_battery(
+                args.trojvqa_root, args.detector_weights_dir, m["model_id"], m["arch"], m["detector"],
+                items, args.levels, args.n_repeats, args.device,
+            )
+            score = batch_anomaly_score(trials, responses, null)
+            row = {
+                "model_id": m["model_id"], "is_clean": m["is_clean"] == "True",
+                "trigger": m.get("trigger", ""), "score": score, "n_trials": len(trials),
+            }
+            results.append(row)
+            out_writer.writerow(row)
+            out_f.flush()
+            os.fsync(out_f.fileno())
+            print(f"  {m['model_id']:24s}  is_clean={str(m['is_clean']):5s}  trigger={m.get('trigger',''):10s}  "
+                  f"anomaly_score={score:.4f}  (n_trials={len(trials)})")
 
     y_true = np.array([0 if r["is_clean"] else 1 for r in results])
     scores = np.array([r["score"] for r in results])
@@ -166,7 +175,7 @@ def main():
     trigger_types = sorted(set(r["trigger"] for r in results if not r["is_clean"] and r["trigger"]))
     for trig in trigger_types:
         mask = np.array([r["is_clean"] or r["trigger"] == trig for r in results])
-        y_sub, s_ub = y_true[mask], scores[mask]
+        y_sub, s_sub = y_true[mask], scores[mask]
         if len(np.unique(y_sub)) < 2:
             continue
         sub = roc_auc_with_ci(y_sub, s_sub)
